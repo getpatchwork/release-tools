@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+function show_usage() {
+cat << EOF
+Usage: publish-release [-t GITHUB_TOKEN] [-r REF] TAG
+
+Try 'publish-release --help' for more information.
+EOF
+}
+
+function show_help() {
+cat << EOF
+Usage: publish-release [-t GITHUB_TOKEN] [-r REF] [-n NAME] [-d DIR] TAG
+
+  Publish a Patchwork release to GitHub
+
+  Tags a given REF with TAG, pushes the tag to GitHub, and uses the GitHub
+  Releases API to create a release."
+
+  For more information on the GitHub Releases API, refer to the GitHub API
+  Documentation:
+
+    https://developer.github.com/v3/repos/releases/
+
+Example:
+
+  publish-release -t ABC123ZYZ -r HEAD v2.0.0
+
+Options:
+
+  -t GITHUB_TOKEN  a GitHub oAuth token used for authentication; use
+                   https://github.com/settings/tokens to generate a personal
+                   access token
+  -r REF           a commit or object; defaults to HEAD
+  -n NAME          name for the release; only used if tagging a new release
+                   rather than a bugfix release or release candidate
+  -d DIR           source directory for Patchwork. Defaults to '../patchwork'
+  -v               display version information and exit
+  -h               display this help text and exit
+EOF
+}
+
+#
+# Read arguments from user
+#
+
+OPTIND=1  # reset in case getopts has been used previously in the shell.
+
+github_token=""
+ref="HEAD"
+name=""
+dir="$DIR/../patchwork"
+while getopts "h?r:t:n:d:" opt; do
+    case "$opt" in
+    h)
+        show_help
+        exit 0
+        ;;
+    r)  ref=$OPTARG
+        ;;
+    t)  github_token=$OPTARG
+        ;;
+    n)  name=$OPTARG
+        ;;
+    d)  dir=$OPTARG
+        ;;
+    esac
+done
+
+tag=${*:$OPTIND:1}
+if [[ -z "${tag// }" ]]; then
+    echo "TAG must be provided"
+    exit 2
+fi
+
+#
+# Useful debug information
+#
+
+echo "Debug info -->"
+echo ""
+
+echo "dir=$dir"
+echo "ref=$ref"
+echo "tag=$tag"
+echo "name=$name"
+echo "github_token=$github_token"
+
+#
+# Determine if release is a pre-release, bug fix, or full release
+#
+if [[ "$tag" =~ ^v[0-9].[0-9].0$ ]]; then
+    # MAJOR/MINOR release
+    pre_release=false
+
+    release_version="$tag"
+    candidate_version=""
+
+    if [[ -z "${name// }" ]]; then
+        echo "-n NAME must be specified if tagging a MAJOR.MINOR release"
+        exit 2
+    fi
+
+    title="$tag (\\\"$name\\\")"
+    message="TODO"
+elif [[ "$tag" =~ ^(v[0-9].[0-9].)([0-9]+)$ ]]; then
+    # PATCH (bugfix) release
+    pre_release=false
+
+    release_version="$tag"
+    candidate_version=""
+    old_version="${BASH_REMATCH[1]}$((${BASH_REMATCH[2]}-1))"
+
+    title="$tag"
+    message="This release fixes a number of bugs found in the $old_version release."
+elif [[ "$tag" =~ ^(v[0-9].[0-9].0)-rc([0-9])$ ]]; then
+    # release candidate
+    pre_release=true
+
+    release_version="${BASH_REMATCH[1]}"
+    candidate_version="${BASH_REMATCH[2]}"
+
+    title="$release_version Release Candidate $candidate_version"
+    message="This is release candidate $candidate_version of Patchwork $release_version"
+else
+    show_usage
+    exit 2
+fi
+
+echo "pre_release=$pre_release"
+echo "release_version=$release_version"
+echo "candidate_version=$candidate_version"
+echo "message=$message"
+
+# Main function
+
+echo ""
+echo "Tagging release '$ref' with '$tag' -->"
+echo ""
+
+pushd "$dir"
+
+if ! git tag -a -m "Version $tag" "$tag"; then
+    echo "Failed to tag release"
+    exit 2
+fi
+
+echo ""
+echo "Push Tags -->"
+echo ""
+
+git push --tags
+
+popd
+
+echo ""
+echo "Publish Release -->"
+echo ""
+
+releases_json=$(printf '{"tag_name": "%s","target_commitish": "master","name": "%s","body": "%s","draft": false,"prerelease": %s}' "$tag" "$title" "$message" "$pre_release")
+curl --data "$releases_json" "https://api.github.com/repos/getpatchwork/patchwork/releases?access_token=$github_token"
